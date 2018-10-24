@@ -9,13 +9,20 @@
 #include <opencv2/opencv.hpp>   
 #include <opencv2/rgbd.hpp>
 
-#define DEBUG_SL 0
+// Project size
+#define PROJECT_WIDTH 1023
+#define PROJECT_HEIGHT 624
+// Resizing
+#define RESIZE_WIDTH 1224
+#define RESIZE_HEIGHT 816
+// Tresh values
+#define W_TRESH 0
+#define B_TRESH 0
+// Param file
+#define PARAM_FILE "cam_param.yml"
 
 static const char *keys = {
-    "{@images_list              | | Image list where the captured pattern images are saved}"
-    "{@calib_param_path         | | Calibration_parameters}"
-    "{@proj_width               | | The projector width used to acquire the pattern}"
-    "{@proj_height              | | The projector height used to acquire the pattern}"
+    "{@images_path               | | Path for the images }"
     "{@white_thresh             | | The white threshold height (optional)}"
     "{@black_thresh             | | The black threshold (optional)}"
 };
@@ -24,55 +31,46 @@ int main(int argc, char **argv)
 {
     cv::structured_light::GrayCodePattern::Params params;
     cv::CommandLineParser parser(argc, argv, keys);
-    // Get the path of where the folders containing left and right should be
     std::string images_path = parser.get<std::string>(0);
-    std::string calib_file = parser.get<std::string>(1);
-    params.width = parser.get<int>(2);
-    params.height = parser.get<int>(3);
+    std::string calib_file = PARAM_FILE;
+    params.width = PROJECT_WIDTH;
+    params.height = PROJECT_HEIGHT;
 
-    if (images_path.empty() || calib_file.empty() || params.width < 1 || params.height < 1 || argc < 5 || argc > 7)
+    if (images_path.empty())
     {
-        std::cout << "Error in the arguments passed... at least one of them is incorrect" << std::endl;
+        std::cout << "No path argument passed or wrong argument" << std::endl;
         return -1;
     }
 
-    cv::Ptr<structured_light::GrayCodePattern> graycode = cv::structured_light::GrayCodePattern::create(params);
-    size_t white_thresh = 0;
-    size_t black_thresh = 0;
+    cv::Ptr<cv::structured_light::GrayCodePattern> graycode = cv::structured_light::GrayCodePattern::create(params);
+    size_t white_thresh = W_TRESH;
+    size_t black_thresh = B_TRESH;
 
-    if (argc == 7)
+    if (argc == 3)
     {
         // If passed, setting the white and black threshold, otherwise using default values
-        white_thresh = parser.get<unsigned>(4);
-        black_thresh = parser.get<unsigned>(5);
+        white_thresh = parser.get<unsigned>(1);
+        black_thresh = parser.get<unsigned>(2);
         graycode->setWhiteThreshold(white_thresh);
         graycode->setBlackThreshold(black_thresh);
     }
 
-    cv::FileStorage file_storage(images_path, cv::FileStorage::READ);
-    std::string images_path, file_format;
-    // TODO: Make a function to have split foderls
-    file_storage["path"] >> images_path;
-    file_storage["format"] >> file_format;
-    images_path += "/*." + file_format;
+    std::string right_path, left_path;
+    right_path = images_path + "/right/*.JPG";
+    left_path = images_path + "/left/*.JPG";
 
+    std::vector<cv::String> r_files;
+    std::vector<cv::String> l_files;
     std::vector<cv::String> files;
-    std::vector<cv::Mat> image_list;
-    cv::glob(images_path, files, true);
 
-    for (size_t i = 0; i < files.size(); i++) {
-        cv::Mat image = cv::imread(files[i]);
-        if (image.empty()) continue;
-        image_list.push_back(image);
+    cv::glob(left_path, l_files, true);
+    cv::glob(right_path, r_files, true);
 
-#if DEBUG_SL
-        std::cout << "Image: " << files[i] << " pushed back!" << std::endl;
-#endif
-    }
+    files.insert(files.end(), l_files.begin(), l_files.end());
+    files.insert(files.end(), r_files.begin(), r_files.end());
 
-    cv::FileStorage file_storage(calib_file, cv::FileStorage::READ);
-    Mat cam1_intr, cam1_dist, cam2_intr, cam2_dist, R, T;
-    Mat cam1intrinsics, cam1distCoeffs, cam2intrinsics, cam2distCoeffs, R, T;
+    cv::FileStorage fs(calib_file, cv::FileStorage::READ);
+    cv::Mat cam1intrinsics, cam1distCoeffs, cam2intrinsics, cam2distCoeffs, R, T;
     fs["cam1_intrinsics"] >> cam1intrinsics;
     fs["cam2_intrinsics"] >> cam2intrinsics;
     fs["cam1_distorsion"] >> cam1distCoeffs;
@@ -80,14 +78,87 @@ int main(int argc, char **argv)
     fs["R"] >> R;
     fs["T"] >> T;
 
-#if DEBUG_SL
-    cout << "cam1intrinsics" << endl << cam1intrinsics << endl;
-    cout << "cam1distCoeffs" << endl << cam1distCoeffs << endl;
-    cout << "cam2intrinsics" << endl << cam2intrinsics << endl;
-    cout << "cam2distCoeffs" << endl << cam2distCoeffs << endl;
-    cout << "T" << endl << T << endl << "R" << endl << R << endl;
-#endif
+    std::cout << "Params found!" << std::endl;
 
-    size_t num_pattern_images = graycode->getNumberOfPatternImages();
-    vector<vector<cv::Mat>> captured_pattern;
+    size_t numberOfPatternImages = graycode->getNumberOfPatternImages();
+    std::vector<std::vector<cv::Mat> > captured_pattern;
+
+    captured_pattern.resize(2);
+    captured_pattern[0].resize(numberOfPatternImages);
+    captured_pattern[1].resize(numberOfPatternImages);
+
+    cv::Mat color = imread(files[numberOfPatternImages], cv::IMREAD_COLOR);
+    cv::Size imagesSize = color.size();
+
+    std::cout << "Rectifying images..." << std::endl;
+
+    cv::Mat R1, R2, P1, P2, Q;
+    cv::Rect validRoi[2];
+    cv::stereoRectify(cam1intrinsics, cam1distCoeffs, cam2intrinsics, cam2distCoeffs, imagesSize, R, T, R1, R2, P1, P2, Q, 0, -1, imagesSize, &validRoi[0], &validRoi[1]);
+    cv::Mat map1x, map1y, map2x, map2y;
+    initUndistortRectifyMap(cam1intrinsics, cam1distCoeffs, R1, P1, imagesSize, CV_32FC1, map1x, map1y);
+    initUndistortRectifyMap(cam2intrinsics, cam2distCoeffs, R2, P2, imagesSize, CV_32FC1, map2x, map2y);
+
+    for (size_t i = 0; i < numberOfPatternImages; i++)
+    {
+        captured_pattern[0][i] = imread(files[i], cv::IMREAD_GRAYSCALE);
+        captured_pattern[1][i] = imread(files[i + numberOfPatternImages + 2], cv::IMREAD_GRAYSCALE);
+
+        if ((!captured_pattern[0][i].data) || (!captured_pattern[1][i].data))
+        {
+            std::cout << "Empty images" << std::endl;
+            return -1;
+        }
+
+        remap(captured_pattern[1][i], captured_pattern[1][i], map1x, map1y, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar());
+        remap(captured_pattern[0][i], captured_pattern[0][i], map2x, map2y, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar());
+    }
+
+    std::cout << "Done!" << std::endl;
+
+    std::vector<cv::Mat> blackImages, whiteImages;
+    blackImages.resize(2);
+    whiteImages.resize(2);
+
+    cvtColor(color, whiteImages[0], cv::COLOR_RGB2GRAY);
+    whiteImages[1] = imread(files[2 * numberOfPatternImages + 2], cv::IMREAD_GRAYSCALE);
+    blackImages[0] = imread(files[numberOfPatternImages + 1], cv::IMREAD_GRAYSCALE);
+    blackImages[1] = imread(files[2 * numberOfPatternImages + 2 + 1], cv::IMREAD_GRAYSCALE);
+    remap(color, color, map2x, map2y, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar());
+    remap(whiteImages[0], whiteImages[0], map2x, map2y, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar());
+    remap(whiteImages[1], whiteImages[1], map1x, map1y, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar());
+    remap(blackImages[0], blackImages[0], map2x, map2y, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar());
+    remap(blackImages[1], blackImages[1], map1x, map1y, cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar());
+
+    std::cout << std::endl << "Decoding pattern..." << std::endl;
+    cv::Mat disparityMap;
+    bool decoded = graycode->decode(captured_pattern, disparityMap, blackImages, whiteImages, cv::structured_light::DECODE_3D_UNDERWORLD);
+
+    if (decoded)
+    {
+        std::cout << std::endl << "Done!" << std::endl;
+
+        double min;
+        double max;
+        minMaxIdx(disparityMap, &min, &max);
+        cv::Mat cm_disp, scaledDisparityMap;
+        std::cout << "Min: " << min << std::endl << "Max: " << max << std::endl;
+        convertScaleAbs(disparityMap, scaledDisparityMap, 255 / (max - min));
+        applyColorMap(scaledDisparityMap, cm_disp, cv::COLORMAP_JET);
+
+        resize(cm_disp, cm_disp, cv::Size(RESIZE_WIDTH, RESIZE_HEIGHT));
+
+        disparityMap.convertTo(disparityMap, CV_32FC1);
+
+        cv::Mat dst, thresholded_disp;
+        threshold(scaledDisparityMap, thresholded_disp, 0, 255, cv::THRESH_OTSU + cv::THRESH_BINARY);
+        resize(thresholded_disp, dst, cv::Size(RESIZE_WIDTH, RESIZE_HEIGHT));
+
+        std::cout << "Converting the mats" << std::endl;
+        dst.convertTo(dst, CV_32FC1);
+
+        std::cout << "Saving exr files..." << std::endl;
+        imwrite("disparity_map.exr", disparityMap);
+        imwrite("dst.exr", dst);
+    }
 }
